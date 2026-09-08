@@ -1,0 +1,10 @@
+{
+    "name": "scytale-passbook",
+    "private": true,
+    "version": "0.1.0",
+    "scripts": {
+        "build:desktop": "npm --prefix desktop run build",
+        "build:mobile": "npm --prefix mobile run build",
+        "build": "npm run build:desktop && npm run build:mobile"
+    }
+}
