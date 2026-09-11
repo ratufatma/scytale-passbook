@@ -397,15 +397,77 @@ td.right {
     }
 }
 
-.loading {
-    display: grid;
-    place-items: center;
-    height: 100vh;
-    color: #5fe1b4;
-    font: 14px 'DM Mono', monospace
+/* Desktop address search bar */
+.desktop-search {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin: 22px 0 0;
+    border: 1px solid #2b5d5b;
+    border-radius: 11px;
+    background: #0c2729;
+    overflow: hidden
 }
 
-.loading span {
-    margin-left: 8px;
-    letter-spacing: 4px
+.ds-icon {
+    margin-left: 14px;
+    color: #5b9e93;
+    flex-shrink: 0
+}
+
+.ds-input {
+    flex: 1;
+    background: transparent;
+    border: 0;
+    outline: none;
+    color: #d4f2ea;
+    font: 12px 'DM Mono', monospace;
+    padding: 13px 10px;
+    min-width: 0
+}
+
+.ds-input::placeholder {
+    color: #436c66
+}
+
+.ds-submit {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: #1a4d4a;
+    border: 0;
+    border-left: 1px solid #2b5d5b;
+    color: #68e3b9;
+    font: 12px 'DM Mono', monospace;
+    padding: 0 20px;
+    height: 46px;
+    cursor: pointer;
+    white-space: nowrap
+}
+
+.ds-submit:disabled {
+    opacity: .5;
+    cursor: default
+}
+
+/* Error banner */
+.desktop-error {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 16px 0 0;
+    padding: 13px 18px;
+    border: 1px solid #6b3333;
+    border-radius: 10px;
+    background: #2b1212;
+    color: #ff9e9e;
+    font: 12px 'DM Mono', monospace
+}
+
+/* Empty table message */
+.empty-table {
+    color: #4c8c82;
+    font: 12px 'DM Mono', monospace;
+    padding: 24px 0;
+    text-align: center
 }

@@ -29,4 +29,4 @@ export interface PassbookLedgerData {
 }
 
 export const QUANTA_PER_SCY = 100_000_000;
-export const DEFAULT_NODE_URL = 'http://116.212.72.89:8332';
+export const DEFAULT_NODE_URL = 'https://explorer.myratu.com';
