@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Shield,
   Layers,
@@ -15,8 +15,10 @@ import {
   Database,
   Clock,
   Lock,
-  PlusCircle,
-  Cpu
+  Cpu,
+  Wifi,
+  WifiOff,
+  AlertCircle
 } from 'lucide-react';
 import GeminiIcon from './icons/GeminiIcon.tsx';
 
@@ -52,6 +54,10 @@ export interface PassbookData {
   p2pkhAddress: string;
 }
 
+const DEFAULT_NODE = "http://127.0.0.1:8332";
+const FALLBACK_NODE = "https://explorer.myratu.com";
+const DEFAULT_ADDRESS = "scy19kf72spzrs8v6e54tvcq48aeanzr3ux63r4x062h0e7rge3kad0s4v5cna";
+
 export default function DesktopPassbook() {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -59,44 +65,29 @@ export default function DesktopPassbook() {
   const [showQrModal, setShowQrModal] = useState(false);
   const [selectedUtxo, setSelectedUtxo] = useState<UtxoItem | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [networkPing, setNetworkPing] = useState(24);
+  const [networkPing, setNetworkPing] = useState(0);
+  const [isOnline, setIsOnline] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const [nodeUrl, setNodeUrl] = useState(DEFAULT_NODE);
+  const [walletAddress, setWalletAddress] = useState(DEFAULT_ADDRESS);
+  const [addressInput, setAddressInput] = useState(DEFAULT_ADDRESS);
 
   // Synchronized node state
   const [passbookData, setPassbookData] = useState<PassbookData>({
     accountNumber: "SCY-004812",
-    passbookId: "scy1nw7vhxmxyz2jlw89vz88tdv938692xk968uxn89787fa4w207s8sddvv3q",
+    passbookId: DEFAULT_ADDRESS,
     derivationPath: "m/44'/999'/0'/0/0",
-    nodeUrl: "http://127.0.0.1:8332",
-    blockTip: 1084,
-    totalQuanta: 1980000000000000,
+    nodeUrl: DEFAULT_NODE,
+    blockTip: 0,
+    totalQuanta: 0,
     isSynced: true,
-    mempoolTxs: 1,
-    p2pkhAddress: "scy1nw7vhxmxyz2jlw89vz88tdv938692xk968uxn89787fa4w207s8sddvv3q"
+    mempoolTxs: 0,
+    p2pkhAddress: DEFAULT_ADDRESS
   });
 
-  const [utxos, setUtxos] = useState<UtxoItem[]>([
-    {
-      txid: "f8c04455dd8982944f59cf017ac701dbb12c42aa2b022b353886d5382816fc21",
-      vout: 0,
-      quanta: 1980000000000000,
-      blockHeight: 0,
-      status: 'CONFIRMED',
-      scriptPubKey: "OP_DUP OP_BLAKE3 73a020... OP_EQUALVERIFY OP_CHECKSIG",
-      confirmations: 1
-    }
-  ]);
-
-  const [mutations, setMutations] = useState<MutationItem[]>([
-    {
-      id: "m_genesis",
-      timestamp: "Genesis Epoch (0)",
-      type: "REWARD",
-      txHash: "0xf8c04455dd89...16fc21",
-      quantaDelta: 1980000000000000,
-      runningBalanceQuanta: 1980000000000000,
-      note: "Genesis founder allocation & mining reward"
-    }
-  ]);
+  const [utxos, setUtxos] = useState<UtxoItem[]>([]);
+  const [mutations, setMutations] = useState<MutationItem[]>([]);
 
   const formatSCY = (quanta: number) => (quanta / 100000000).toLocaleString('en-US', {
     minimumFractionDigits: 4,
@@ -111,78 +102,101 @@ export default function DesktopPassbook() {
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  const loadFromNode = async () => {
+  const fetchLiveData = useCallback(async (addr: string = walletAddress, url: string = nodeUrl) => {
     setIsRefreshing(true);
+    setErrorMsg(null);
+    const startTime = performance.now();
+
     try {
-      const endpoints = [
-        'http://127.0.0.1:8332/api/v1/passbook?address=scy1nw7vhxmxyz2jlw89vz88tdv938692xk968uxn89787fa4w207s8sddvv3q',
-        'https://explorer.myratu.com/api/v1/passbook?address=scy1nw7vhxmxyz2jlw89vz88tdv938692xk968uxn89787fa4w207s8sddvv3q'
-      ];
-      let data: any = null;
-      for (const ep of endpoints) {
-        try {
-          const res = await fetch(ep, { signal: AbortSignal.timeout(2500) });
-          if (res.ok) {
-            data = await res.json();
-            break;
-          }
-        } catch {
-          // fallback to next
+      // 1. Fetch Node Status
+      const statusRes = await fetch(`${url}/api/v1/status`, { signal: AbortSignal.timeout(3500) });
+      if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status} on status`);
+      const statusJson = await statusRes.json();
+      const ping = Math.round(performance.now() - startTime);
+
+      // 2. Fetch Passbook Balances & Mutations
+      const pbRes = await fetch(`${url}/api/v1/passbook?address=${encodeURIComponent(addr)}`, { signal: AbortSignal.timeout(4000) });
+      if (!pbRes.ok) throw new Error(`HTTP ${pbRes.status} on passbook`);
+      const pbJson = await pbRes.json();
+
+      // 3. Fetch UTXOs (tolerant to 404 or missing endpoints)
+      let utxoList: any[] = [];
+      try {
+        const utxoRes = await fetch(`${url}/api/v1/utxos?address=${encodeURIComponent(addr)}`, { signal: AbortSignal.timeout(4000) });
+        if (utxoRes.ok) {
+          const rawUtxos = await utxoRes.json();
+          utxoList = Array.isArray(rawUtxos) ? rawUtxos : (rawUtxos.utxos || []);
         }
+      } catch {
+        utxoList = [];
       }
 
-      if (data) {
-        const balance = Number(data.confirmed_native_balance_quanta ?? data.balance_quanta ?? data.balance ?? 0);
-        setPassbookData(prev => ({
-          ...prev,
-          totalQuanta: balance > 0 ? balance : prev.totalQuanta,
-          blockTip: Number(data.block_height ?? prev.blockTip)
-        }));
+      const confirmed = Number(pbJson.confirmed_native_balance_quanta ?? pbJson.balance_quanta ?? pbJson.balance ?? 0);
+      const tip = Number(statusJson.block_height ?? statusJson.canonical_height ?? 0);
+      const mempool = Number(statusJson.mempool_count ?? statusJson.pending_tx_count ?? statusJson.mempool_tx_count ?? 0);
+      const synced = statusJson.is_synced ?? (statusJson.runtime_state === 'Running');
+
+      setPassbookData(prev => ({
+        ...prev,
+        p2pkhAddress: addr,
+        passbookId: pbJson.passbook_id || addr,
+        nodeUrl: url,
+        blockTip: tip,
+        mempoolTxs: mempool,
+        totalQuanta: confirmed,
+        isSynced: synced
+      }));
+
+      setNetworkPing(ping);
+      setIsOnline(true);
+
+      const parsedMutations: MutationItem[] = (pbJson.entries || []).map((e: any, idx: number) => ({
+        id: e.id || e.txid || e.tx_hash || `entry-${idx}`,
+        timestamp: e.timestamp
+          ? (typeof e.timestamp === 'number' ? new Date(e.timestamp * 1000).toISOString() : String(e.timestamp))
+          : new Date().toISOString(),
+        type: e.type || (Number(e.quanta_delta ?? e.amount ?? 0) >= 0 ? 'INBOUND' : 'OUTBOUND'),
+        txHash: e.tx_hash || e.txid || e.hash || '-',
+        quantaDelta: Number(e.quanta_delta ?? e.amount ?? 0),
+        runningBalanceQuanta: Number(e.balance_after ?? e.running_balance ?? confirmed),
+        note: e.note || e.memo || (e.type === 'REWARD' ? 'Mining Subsidy' : undefined)
+      }));
+      setMutations(parsedMutations);
+
+      const parsedUtxos: UtxoItem[] = utxoList.map((u: any) => ({
+        txid: u.txid || u.tx_hash || '0000000000000000000000000000000000000000000000000000000000000000',
+        vout: Number(u.vout ?? 0),
+        quanta: Number(u.quanta ?? u.value ?? 0),
+        blockHeight: Number(u.block_height ?? u.height ?? 0),
+        status: (u.confirmations && u.confirmations > 0) ? 'CONFIRMED' : 'PENDING',
+        scriptPubKey: u.script_pubkey || u.scriptPubKey,
+        confirmations: Number(u.confirmations ?? 1)
+      }));
+      setUtxos(parsedUtxos);
+
+    } catch (err: any) {
+      // Fallback ke gateway publik jika node lokal gagal
+      if (url !== FALLBACK_NODE) {
+        console.warn(`Node lokal ${url} tidak merespons, beralih ke ${FALLBACK_NODE}...`);
+        setNodeUrl(FALLBACK_NODE);
+        return fetchLiveData(addr, FALLBACK_NODE);
       }
-    } catch {
-      // offline fallback
+      setIsOnline(false);
+      setErrorMsg(`Gagal memuat data dari node: ${err.message}`);
     } finally {
       setIsRefreshing(false);
     }
-  };
+  }, [walletAddress, nodeUrl]);
 
   useEffect(() => {
-    void loadFromNode();
-  }, []);
+    void fetchLiveData(walletAddress, nodeUrl);
+  }, [fetchLiveData, walletAddress]);
 
-  const handleSimulateInboundTx = () => {
-    const delta = 15000000000; // 150 SCY
-    const newTotal = passbookData.totalQuanta + delta;
-    const newBlock = passbookData.blockTip + 1;
-    const newTxId = `scy_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`;
-
-    const newMutation: MutationItem = {
-      id: `m_${Date.now()}`,
-      timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      type: 'INBOUND',
-      txHash: `${newTxId.substring(0, 8)}...${newTxId.substring(newTxId.length - 6)}`,
-      quantaDelta: delta,
-      runningBalanceQuanta: newTotal,
-      note: "Incoming P2PKH peer transfer"
-    };
-
-    const newUtxo: UtxoItem = {
-      txid: `${newTxId}f8a7e6d5c4b3a21e0f9876543210fedcba`,
-      vout: 0,
-      quanta: delta,
-      blockHeight: newBlock,
-      status: 'CONFIRMED',
-      scriptPubKey: "OP_DUP OP_BLAKE3 e0f987... OP_EQUALVERIFY OP_CHECKSIG",
-      confirmations: 1
-    };
-
-    setPassbookData(prev => ({
-      ...prev,
-      totalQuanta: newTotal,
-      blockTip: newBlock
-    }));
-    setMutations(prev => [newMutation, ...prev]);
-    setUtxos(prev => [newUtxo, ...prev]);
+  const handleQueryAddress = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (addressInput.trim()) {
+      setWalletAddress(addressInput.trim());
+    }
   };
 
   const filteredMutations = useMemo(() => {
@@ -199,11 +213,11 @@ export default function DesktopPassbook() {
   return (
     <div className="w-full min-h-screen bg-zinc-950 text-zinc-100 p-4 sm:p-6 md:p-8 font-sans selection:bg-emerald-500/30 selection:text-emerald-200">
       {/* Viewport Control Bar & Network Telemetry */}
-      <header className="max-w-7xl mx-auto mb-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-zinc-800/80 pb-4">
+      <header className="max-w-7xl mx-auto mb-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-zinc-800/80 pb-4">
         <div className="flex items-center gap-3">
           <div className="relative flex items-center justify-center">
-            <span className="w-3 h-3 rounded-full bg-emerald-500 animate-ping absolute opacity-75" />
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 relative" />
+            <span className={`w-3 h-3 rounded-full animate-ping absolute opacity-75 ${isOnline ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+            <span className={`w-2.5 h-2.5 rounded-full relative ${isOnline ? 'bg-emerald-400' : 'bg-rose-400'}`} />
           </div>
           <GeminiIcon className="w-6 h-6 rounded-md shrink-0 shadow-lg shadow-cyan-950/50" size={24} />
           <div>
@@ -219,39 +233,89 @@ export default function DesktopPassbook() {
               </span>
             </div>
             <div className="text-[11px] font-mono text-zinc-400 flex items-center gap-2 mt-0.5">
-              <span>Node: {passbookData.nodeUrl}</span>
+              <span className="flex items-center gap-1">
+                {isOnline ? <Wifi className="w-3 h-3 text-emerald-400" /> : <WifiOff className="w-3 h-3 text-rose-400" />}
+                <span>{passbookData.nodeUrl}</span>
+              </span>
               <span className="text-zinc-700">•</span>
-              <span className="text-emerald-400/90">{networkPing}ms latency</span>
+              <span className={isOnline ? "text-emerald-400/90" : "text-rose-400/90"}>
+                {isOnline ? `${networkPing}ms latency` : 'OFFLINE'}
+              </span>
               <span className="text-zinc-700">•</span>
               <span className="text-cyan-400/90">mempool: {passbookData.mempoolTxs} txs</span>
             </div>
           </div>
         </div>
 
-        {/* Quick Actions */}
+        {/* Quick Actions & Live Refresh */}
         <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
           <button
-            id="simulate-inbound-btn"
-            onClick={handleSimulateInboundTx}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono rounded-lg bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/50 transition active:scale-95"
-            title="Simulate incoming inbound payment"
-          >
-            <PlusCircle className="w-3.5 h-3.5 text-emerald-400" />
-            <span>+150 SCY</span>
-          </button>
-
-          <button
-            id="sync-node-btn"
-            onClick={loadFromNode}
+            id="refresh-network-btn"
+            onClick={() => void fetchLiveData(walletAddress, nodeUrl)}
             disabled={isRefreshing}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 transition active:scale-95 disabled:opacity-50"
-            title="Poll Node & Increment Block Tip"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono rounded-lg bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/50 transition active:scale-95 disabled:opacity-50"
+            title="Muat Ulang Data dari Node Scytale"
           >
-            <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${isRefreshing ? 'animate-spin' : ''}`} />
-            <span>Sync</span>
+            <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <span>{isRefreshing ? 'Memuat...' : 'Refresh Jaringan'}</span>
           </button>
         </div>
       </header>
+
+      {/* Error Alert Banner */}
+      {errorMsg && (
+        <div className="max-w-7xl mx-auto mb-4 p-3 rounded-xl bg-rose-950/40 border border-rose-800/60 text-rose-300 text-xs font-mono flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{errorMsg}</span>
+          </div>
+          <button
+            onClick={() => void fetchLiveData(walletAddress, FALLBACK_NODE)}
+            className="px-2.5 py-1 rounded bg-rose-900/60 hover:bg-rose-800 text-rose-100 transition text-[11px] font-semibold"
+          >
+            Coba Gateway Explorer
+          </button>
+        </div>
+      )}
+
+      {/* Wallet Address Inspector Toolbar */}
+      <div className="max-w-7xl mx-auto mb-6 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 flex flex-col md:flex-row items-center justify-between gap-3">
+        <form onSubmit={handleQueryAddress} className="flex items-center gap-2 w-full flex-1">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={addressInput}
+              onChange={(e) => setAddressInput(e.target.value)}
+              placeholder="Masukkan alamat Scytale (scy1...)"
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-9 pr-3 py-1.5 text-xs font-mono text-zinc-200 focus:outline-none focus:border-emerald-500/50"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={isRefreshing}
+            className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold font-mono text-xs transition active:scale-95 shrink-0"
+          >
+            Query
+          </button>
+        </form>
+
+        <div className="flex items-center gap-2 text-xs font-mono text-zinc-400 shrink-0">
+          <span className="text-[11px] text-zinc-500">Target Node:</span>
+          <select
+            value={nodeUrl}
+            onChange={(e) => {
+              const newUrl = e.target.value;
+              setNodeUrl(newUrl);
+              void fetchLiveData(walletAddress, newUrl);
+            }}
+            className="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-300 text-xs focus:outline-none focus:border-emerald-500"
+          >
+            <option value="http://127.0.0.1:8332">Lokal (127.0.0.1:8332)</option>
+            <option value="https://explorer.myratu.com">Publik (explorer.myratu.com)</option>
+          </select>
+        </div>
+      </div>
 
       {/* Main 100% Window Desktop Canvas */}
       <main className="max-w-7xl mx-auto">
@@ -417,7 +481,11 @@ export default function DesktopPassbook() {
             </p>
 
             <div className="space-y-3">
-              {utxos.map((utxo) => (
+              {utxos.length === 0 ? (
+                <div className="p-6 text-center text-zinc-500 font-mono text-xs rounded-xl bg-zinc-950/40 border border-dashed border-zinc-800">
+                  Tidak ada output UTXO belum terpakai untuk alamat ini.
+                </div>
+              ) : utxos.map((utxo) => (
                 <div
                   key={`${utxo.txid}-${utxo.vout}`}
                   onClick={() => setSelectedUtxo(utxo)}
