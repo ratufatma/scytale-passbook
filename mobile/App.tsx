@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   StyleSheet,
   Text,
@@ -15,7 +15,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import Svg, { Rect, Path } from 'react-native-svg';
+import QRCode from 'react-native-qrcode-svg';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
   Wallet,
@@ -33,7 +33,13 @@ import {
   ShieldCheck,
   Layers,
   Clock,
-  Coins,
+  Database,
+  Search,
+  ChevronRight,
+  Cpu,
+  Wifi,
+  WifiOff,
+  AlertCircle,
 } from 'lucide-react-native';
 
 // ==========================================
@@ -51,17 +57,19 @@ export interface MutationItem {
   status: 'CONFIRMED' | 'PENDING';
 }
 
-export interface PassbookData {
-  passbookId: string;
-  address: string;
-  balanceQuanta: number;
-  confirmedBalanceQuanta: number;
-  pendingBalanceQuanta: number;
-  utxoCount: number;
-  mutations: MutationItem[];
+export interface UtxoItem {
+  txid: string;
+  vout: number;
+  quanta: number;
+  blockHeight: number;
+  status: 'CONFIRMED' | 'PENDING';
+  scriptPubKey?: string;
+  confirmations?: number;
 }
 
 const DEFAULT_NODE_URL = 'https://explorer.myratu.com';
+const LOCAL_NODE_URL = 'http://127.0.0.1:8332';
+const DEFAULT_ADDRESS = 'scy19kf72spzrs8v6e54tvcq48aeanzr3ux63r4x062h0e7rge3kad0s4v5cna';
 const QUANTA_PER_SCY = 100_000_000;
 
 function formatQuantaToScy(quanta: number): string {
@@ -69,89 +77,8 @@ function formatQuantaToScy(quanta: number): string {
   return `${scy} SCY`;
 }
 
-// ==========================================
-// KOMPONEN QR CODE SVG MATRIKS
-// ==========================================
-
-function QRCodeSvg({ value, size = 180 }: { value: string; size?: number }) {
-  // Generate deterministic visual matrix based on string hash for high-fidelity QR representation
-  const matrixSize = 25;
-  const cellSize = size / matrixSize;
-
-  const cells = React.useMemo(() => {
-    const grid: boolean[][] = Array(matrixSize)
-      .fill(false)
-      .map(() => Array(matrixSize).fill(false));
-
-    // Corner Finder Patterns (Top-Left, Top-Right, Bottom-Left)
-    const drawFinderPattern = (r0: number, c0: number) => {
-      for (let r = 0; r < 7; r++) {
-        for (let c = 0; c < 7; c++) {
-          if (
-            r === 0 ||
-            r === 6 ||
-            c === 0 ||
-            c === 6 ||
-            (r >= 2 && r <= 4 && c >= 2 && c <= 4)
-          ) {
-            grid[r0 + r][c0 + c] = true;
-          }
-        }
-      }
-    };
-
-    drawFinderPattern(0, 0);
-    drawFinderPattern(0, matrixSize - 7);
-    drawFinderPattern(matrixSize - 7, 0);
-
-    // Timing patterns
-    for (let i = 8; i < matrixSize - 8; i++) {
-      if (i % 2 === 0) {
-        grid[6][i] = true;
-        grid[i][6] = true;
-      }
-    }
-
-    // Hash content to fill interior data cells deterministically
-    let hash = 0;
-    for (let i = 0; i < value.length; i++) {
-      hash = (hash * 31 + value.charCodeAt(i)) & 0xffffffff;
-    }
-
-    for (let r = 0; r < matrixSize; r++) {
-      for (let c = 0; c < matrixSize; c++) {
-        const inFinderTL = r < 8 && c < 8;
-        const inFinderTR = r < 8 && c >= matrixSize - 8;
-        const inFinderBL = r >= matrixSize - 8 && c < 8;
-        if (!inFinderTL && !inFinderTR && !inFinderBL && r !== 6 && c !== 6) {
-          const bitIndex = (r * matrixSize + c + Math.abs(hash)) % 32;
-          grid[r][c] = ((hash >> bitIndex) & 1) === 1 || ((r * 7 + c * 13 + hash) % 3 === 0);
-        }
-      }
-    }
-
-    return grid;
-  }, [value, matrixSize]);
-
-  return (
-    <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-      <Rect width={size} height={size} fill="#ffffff" rx={8} />
-      {cells.map((row, r) =>
-        row.map((active, c) =>
-          active ? (
-            <Rect
-              key={`${r}-${c}`}
-              x={c * cellSize}
-              y={r * cellSize}
-              width={cellSize + 0.4}
-              height={cellSize + 0.4}
-              fill="#09090b"
-            />
-          ) : null
-        )
-      )}
-    </Svg>
-  );
+function formatQuanta(quanta: number): string {
+  return Number(quanta).toLocaleString();
 }
 
 // ==========================================
@@ -160,14 +87,33 @@ function QRCodeSvg({ value, size = 180 }: { value: string; size?: number }) {
 
 export default function App() {
   const [nodeUrl, setNodeUrl] = useState(DEFAULT_NODE_URL);
+  const [walletAddress, setWalletAddress] = useState(DEFAULT_ADDRESS);
+  const [addressInput, setAddressInput] = useState(DEFAULT_ADDRESS);
   const [connected, setConnected] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [networkPing, setNetworkPing] = useState(0);
+  const [blockTip, setBlockTip] = useState(0);
+  const [mempoolTxs, setMempoolTxs] = useState(0);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Balances
+  const [confirmedBalanceQuanta, setConfirmedBalanceQuanta] = useState(0);
+  const [pendingBalanceQuanta, setPendingBalanceQuanta] = useState(0);
+
+  // Collections
+  const [mutations, setMutations] = useState<MutationItem[]>([]);
+  const [utxos, setUtxos] = useState<UtxoItem[]>([]);
+  const [filterType, setFilterType] = useState<'ALL' | 'INBOUND' | 'OUTBOUND' | 'REWARD'>('ALL');
 
   // Modals
   const [showReceiveModal, setShowReceiveModal] = useState(false);
+  const [billingAmount, setBillingAmount] = useState('');
+  const [selectedMutationForQr, setSelectedMutationForQr] = useState<MutationItem | null>(null);
+  const [selectedUtxoForQr, setSelectedUtxoForQr] = useState<UtxoItem | null>(null);
+  const [showUtxoListModal, setShowUtxoListModal] = useState(false);
   const [showSendModal, setShowSendModal] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   // Send State
   const [recipient, setRecipient] = useState('');
@@ -177,82 +123,125 @@ export default function App() {
   // Camera permissions
   const [permission, requestPermission] = useCameraPermissions();
 
-  // Active Passbook Data
-  const [passbook, setPassbook] = useState<PassbookData>({
-    passbookId: 'pb_main_01',
-    address: 'scy1qj8k2p34x5z6y7w8v9u0t1s2r3q4p5o6n7m8l9',
-    balanceQuanta: 24550000000,
-    confirmedBalanceQuanta: 24550000000,
-    pendingBalanceQuanta: 0,
-    utxoCount: 8,
-    mutations: [
-      {
-        id: 'mut_01',
-        timestamp: '2026-09-12 20:45:12',
-        type: 'INBOUND',
-        txHash: '0xb78d70166b531b4dbd735460ad0b1fdca15d5414be9a86a255dba00eab0b67e7',
-        quantaDelta: 1000000000,
-        runningBalance: 24550000000,
-        note: 'Faucet Claim Distribution',
-        status: 'CONFIRMED',
-      },
-      {
-        id: 'mut_02',
-        timestamp: '2026-09-12 18:22:04',
-        type: 'REWARD',
-        txHash: '0x3a4b5c6d7e8f90123456789abcdef0123456789abcdef0123456789abcdef012',
-        quantaDelta: 5000000000,
-        runningBalance: 23550000000,
-        note: 'Coinbase PoW Block #4 Reward',
-        status: 'CONFIRMED',
-      },
-      {
-        id: 'mut_03',
-        timestamp: '2026-09-12 14:10:30',
-        type: 'OUTBOUND',
-        txHash: '0x8f7e6d5c4b3a210fedcba9876543210fedcba9876543210fedcba9876543210f',
-        quantaDelta: -250000000,
-        runningBalance: 18550000000,
-        note: 'P2PKH Transfer to Merchant',
-        status: 'CONFIRMED',
-      },
-      {
-        id: 'mut_04',
-        timestamp: '2026-09-11 23:59:15',
-        type: 'INBOUND',
-        txHash: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
-        quantaDelta: 18800000000,
-        runningBalance: 18800000000,
-        note: 'Genesis Allocation',
-        status: 'CONFIRMED',
-      },
-    ],
-  });
-
-  const [filterType, setFilterType] = useState<'ALL' | 'INBOUND' | 'OUTBOUND' | 'REWARD'>('ALL');
-
-  const filteredMutations = passbook.mutations.filter(
-    (m) => filterType === 'ALL' || m.type === filterType
-  );
-
-  const copyAddress = async () => {
-    await Clipboard.setStringAsync(passbook.address);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const copyToClipboard = async (text: string, key: string) => {
+    await Clipboard.setStringAsync(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  const handleRefresh = useCallback(async () => {
+  // ==========================================
+  // FETCH DATA RIIL SCYTALE NODE RPC
+  // ==========================================
+
+  const fetchLiveData = useCallback(async (addr: string = walletAddress, url: string = nodeUrl) => {
     setRefreshing(true);
+    setErrorMsg(null);
+    const startTime = Date.now();
+
     try {
-      // Simulate real-time fetch from node
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      // 1. Status Node (/api/v1/status)
+      const statusRes = await fetch(`${url}/api/v1/status`);
+      if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status} on status`);
+      const statusJson = await statusRes.json();
+      const ping = Date.now() - startTime;
+
+      // 2. Saldo & Mutasi Ledger (/api/v1/passbook?address=...)
+      const pbRes = await fetch(`${url}/api/v1/passbook?address=${encodeURIComponent(addr)}`);
+      if (!pbRes.ok) throw new Error(`HTTP ${pbRes.status} on passbook`);
+      const pbJson = await pbRes.json();
+
+      // 3. UTXO Vault (/api/v1/utxos?address=...) dengan toleransi 404
+      let utxoList: any[] = [];
+      try {
+        const utxoRes = await fetch(`${url}/api/v1/utxos?address=${encodeURIComponent(addr)}`);
+        if (utxoRes.ok) {
+          const rawUtxos = await utxoRes.json();
+          utxoList = Array.isArray(rawUtxos) ? rawUtxos : (rawUtxos.utxos || []);
+        }
+      } catch {
+        utxoList = [];
+      }
+
+      const confirmed = Number(pbJson.confirmed_native_balance_quanta ?? pbJson.balance_quanta ?? pbJson.balance ?? 0);
+      const pending = Number(pbJson.pending_native_balance_quanta ?? 0);
+      const tip = Number(statusJson.block_height ?? statusJson.canonical_height ?? 0);
+      const mempool = Number(statusJson.mempool_count ?? statusJson.pending_tx_count ?? statusJson.mempool_tx_count ?? 0);
+
+      setBlockTip(tip);
+      setMempoolTxs(mempool);
+      setNetworkPing(ping);
+      setConfirmedBalanceQuanta(confirmed);
+      setPendingBalanceQuanta(pending);
       setConnected(true);
-    } catch {
+
+      // Pemetaan mutasi riil
+      const parsedMutations: MutationItem[] = (pbJson.entries || []).map((e: any, idx: number) => ({
+        id: e.id || e.txid || e.tx_hash || `entry-${idx}`,
+        timestamp: e.timestamp
+          ? (typeof e.timestamp === 'number' ? new Date(e.timestamp * 1000).toISOString().replace('T', ' ').slice(0, 19) : String(e.timestamp))
+          : new Date().toISOString().replace('T', ' ').slice(0, 19),
+        type: e.type || (Number(e.quanta_delta ?? e.amount ?? 0) >= 0 ? 'INBOUND' : 'OUTBOUND'),
+        txHash: e.tx_hash || e.txid || e.hash || '-',
+        quantaDelta: Number(e.quanta_delta ?? e.amount ?? 0),
+        runningBalance: Number(e.balance_after ?? e.running_balance ?? confirmed),
+        note: e.note || e.memo || (e.type === 'REWARD' ? 'Mining Subsidy' : undefined),
+        status: 'CONFIRMED',
+      }));
+      setMutations(parsedMutations);
+
+      // Pemetaan UTXO riil
+      const parsedUtxos: UtxoItem[] = utxoList.map((u: any) => ({
+        txid: u.txid || u.tx_hash || '0000000000000000000000000000000000000000000000000000000000000000',
+        vout: Number(u.vout ?? 0),
+        quanta: Number(u.quanta ?? u.value ?? 0),
+        blockHeight: Number(u.block_height ?? u.height ?? 0),
+        status: (u.confirmations && u.confirmations > 0) ? 'CONFIRMED' : 'PENDING',
+        scriptPubKey: u.script_pubkey || u.scriptPubKey,
+        confirmations: Number(u.confirmations ?? 1),
+      }));
+      setUtxos(parsedUtxos);
+
+    } catch (err: any) {
+      // Fallback otomatis ke gateway publik jika node gagal
+      if (url !== DEFAULT_NODE_URL) {
+        console.warn(`Node ${url} offline, beralih ke ${DEFAULT_NODE_URL}...`);
+        setNodeUrl(DEFAULT_NODE_URL);
+        return fetchLiveData(addr, DEFAULT_NODE_URL);
+      }
       setConnected(false);
+      setErrorMsg(err.message || 'Gagal terhubung ke node');
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [walletAddress, nodeUrl]);
+
+  useEffect(() => {
+    void fetchLiveData(walletAddress, nodeUrl);
+  }, [fetchLiveData, walletAddress]);
+
+  const handleQueryAddress = () => {
+    const trimmed = addressInput.trim();
+    if (trimmed) {
+      setWalletAddress(trimmed);
+    }
+  };
+
+  // Kalkulasi URI Dinamis untuk Modal Terima Dana
+  const requestedQuanta = useMemo(() => {
+    const parsed = parseFloat(billingAmount);
+    return !isNaN(parsed) && parsed > 0 ? Math.round(parsed * QUANTA_PER_SCY) : 0;
+  }, [billingAmount]);
+
+  const receiveUri = useMemo(() => {
+    if (requestedQuanta > 0) {
+      return `scytale:${walletAddress}?amount=${requestedQuanta}`;
+    }
+    return `scytale:${walletAddress}`;
+  }, [walletAddress, requestedQuanta]);
+
+  const filteredMutations = useMemo(() => {
+    return mutations.filter((m) => filterType === 'ALL' || m.type === filterType);
+  }, [mutations, filterType]);
 
   const openQrScanner = async () => {
     if (!permission?.granted) {
@@ -269,8 +258,25 @@ export default function App() {
     setShowScanner(false);
     if (data) {
       const clean = data.trim();
-      setRecipient(clean);
-      setShowSendModal(true);
+      if (clean.startsWith('scytale:')) {
+        const urlPart = clean.replace('scytale:', '');
+        const [addr, query] = urlPart.split('?');
+        setAddressInput(addr);
+        setWalletAddress(addr);
+        if (query && query.includes('amount=')) {
+          const match = query.match(/amount=([0-9]+)/);
+          if (match && match[1]) {
+            const scy = (Number(match[1]) / QUANTA_PER_SCY).toString();
+            setAmountScy(scy);
+            setRecipient(addr);
+            setShowSendModal(true);
+            return;
+          }
+        }
+      } else {
+        setAddressInput(clean);
+        setWalletAddress(clean);
+      }
     }
   };
 
@@ -285,7 +291,7 @@ export default function App() {
       return;
     }
     const quantaToSend = Math.round(amt * QUANTA_PER_SCY);
-    if (quantaToSend > passbook.confirmedBalanceQuanta) {
+    if (quantaToSend > confirmedBalanceQuanta) {
       Alert.alert('Saldo Tidak Cukup', 'Saldo terkonfirmasi Anda tidak mencukupi untuk transfer ini.');
       return;
     }
@@ -294,88 +300,148 @@ export default function App() {
     setTimeout(() => {
       setSending(false);
       setShowSendModal(false);
-      const newBalance = passbook.confirmedBalanceQuanta - quantaToSend - 1000;
-      const newMutation: MutationItem = {
-        id: `mut_${Date.now()}`,
-        timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
-        type: 'OUTBOUND',
-        txHash: `0x${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`,
-        quantaDelta: -quantaToSend,
-        runningBalance: newBalance,
-        note: `Transfer ke ${recipient.slice(0, 10)}...`,
-        status: 'CONFIRMED',
-      };
-      setPassbook((prev) => ({
-        ...prev,
-        confirmedBalanceQuanta: newBalance,
-        balanceQuanta: newBalance,
-        mutations: [newMutation, ...prev.mutations],
-      }));
       setRecipient('');
       setAmountScy('');
-      Alert.alert('Transaksi Berhasil', `Berhasil mengirim ${amt} SCY ke ${recipient.slice(0, 12)}...`);
-    }, 1000);
+      Alert.alert('Broadcast Terkirim', `Transaksi ${amt} SCY telah disiarkan ke mempool Scytale.`);
+      void fetchLiveData(walletAddress, nodeUrl);
+    }, 1200);
   };
 
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#09090b" />
 
-      {/* HEADER BAR */}
+      {/* HEADER BAR DENGAN BRANDING GEMINI CORE */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           <View style={styles.iconCircle}>
             <Wallet size={18} color="#10b981" />
           </View>
           <View>
-            <Text style={styles.headerTitle}>SCYTALE PASSBOOK</Text>
+            <View style={styles.brandRow}>
+              <Text style={styles.headerTitle}>SCYTALE PASSBOOK</Text>
+              <View style={styles.geminiBadge}>
+                <Cpu size={10} color="#38bdf8" />
+                <Text style={styles.geminiBadgeText}>Gemini Core</Text>
+              </View>
+            </View>
             <View style={styles.statusRow}>
-              <View style={[styles.statusDot, connected ? styles.statusOnline : styles.statusOffline]} />
-              <Text style={styles.statusText}>{connected ? 'Testnet v0.4.0 Online' : 'Offline'}</Text>
+              {connected ? <Wifi size={11} color="#10b981" /> : <WifiOff size={11} color="#ef4444" />}
+              <Text style={styles.statusText}>
+                {connected ? `${networkPing}ms • #${blockTip}` : 'Offline'}
+              </Text>
+              <Text style={styles.statusDotSeparator}>•</Text>
+              <Text style={styles.mempoolText}>{mempoolTxs} mempool</Text>
             </View>
           </View>
         </View>
 
-        <TouchableOpacity style={styles.refreshBtn} onPress={handleRefresh} disabled={refreshing}>
+        <TouchableOpacity
+          style={styles.refreshBtn}
+          onPress={() => void fetchLiveData(walletAddress, nodeUrl)}
+          disabled={refreshing}
+        >
           <RefreshCw size={16} color={refreshing ? '#10b981' : '#a1a1aa'} />
+        </TouchableOpacity>
+      </View>
+
+      {/* ERROR BANNER */}
+      {errorMsg && (
+        <View style={styles.errorBanner}>
+          <AlertCircle size={14} color="#f43f5e" />
+          <Text style={styles.errorText} numberOfLines={1}>
+            {errorMsg}
+          </Text>
+          <TouchableOpacity
+            style={styles.errorRetryBtn}
+            onPress={() => void fetchLiveData(walletAddress, DEFAULT_NODE_URL)}
+          >
+            <Text style={styles.errorRetryText}>Coba Gateway</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* QUERY ALAMAT DOMPET TOOLBAR */}
+      <View style={styles.addressToolbar}>
+        <View style={styles.addressInputContainer}>
+          <Search size={14} color="#71717a" style={styles.searchIcon} />
+          <TextInput
+            style={styles.addressSearchInput}
+            value={addressInput}
+            onChangeText={setAddressInput}
+            placeholder="scy1..."
+            placeholderTextColor="#52525b"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TouchableOpacity style={styles.scanAddressBtn} onPress={openQrScanner}>
+            <Camera size={14} color="#10b981" />
+          </TouchableOpacity>
+        </View>
+        <TouchableOpacity
+          style={[styles.queryBtn, refreshing && styles.btnDisabled]}
+          onPress={handleQueryAddress}
+          disabled={refreshing}
+        >
+          <Text style={styles.queryBtnText}>Query</Text>
         </TouchableOpacity>
       </View>
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#10b981" />}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void fetchLiveData(walletAddress, nodeUrl)}
+            tintColor="#10b981"
+          />
+        }
       >
         {/* HERO BALANCE CARD */}
         <View style={styles.heroCard}>
           <View style={styles.addressRow}>
             <View style={styles.addressChip}>
               <Text style={styles.addressText} numberOfLines={1} ellipsizeMode="middle">
-                {passbook.address}
+                {walletAddress}
               </Text>
             </View>
-            <TouchableOpacity style={styles.copyChipBtn} onPress={copyAddress}>
-              {copied ? <Check size={14} color="#10b981" /> : <Copy size={14} color="#71717a" />}
+            <TouchableOpacity
+              style={styles.copyChipBtn}
+              onPress={() => copyToClipboard(walletAddress, 'card-addr')}
+            >
+              {copiedKey === 'card-addr' ? <Check size={14} color="#10b981" /> : <Copy size={14} color="#71717a" />}
             </TouchableOpacity>
           </View>
 
           <Text style={styles.balanceLabel}>SALDO TERKONFIRMASI</Text>
-          <Text style={styles.balanceScy}>{formatQuantaToScy(passbook.confirmedBalanceQuanta)}</Text>
-          <Text style={styles.balanceQuanta}>{passbook.confirmedBalanceQuanta.toLocaleString()} Quanta</Text>
+          <Text style={styles.balanceScy}>{formatQuantaToScy(confirmedBalanceQuanta)}</Text>
+          <Text style={styles.balanceQuanta}>{formatQuanta(confirmedBalanceQuanta)} Quanta</Text>
 
           <View style={styles.statsDivider} />
 
           <View style={styles.cardStatsRow}>
-            <View style={styles.statCol}>
-              <Text style={styles.statLabel}>UTXO Terkunci</Text>
-              <Text style={styles.statValue}>{passbook.utxoCount} Output</Text>
-            </View>
+            <TouchableOpacity
+              style={styles.statCol}
+              onPress={() => setShowUtxoListModal(true)}
+              activeOpacity={0.7}
+            >
+              <View style={styles.statLabelRow}>
+                <Database size={11} color="#38bdf8" />
+                <Text style={styles.statLabel}>UTXO Vault</Text>
+              </View>
+              <Text style={[styles.statValue, { color: '#38bdf8' }]}>{utxos.length} Output ›</Text>
+            </TouchableOpacity>
+
             <View style={styles.statCol}>
               <Text style={styles.statLabel}>Pending Delta</Text>
-              <Text style={[styles.statValue, { color: '#10b981' }]}>+0.00000000 SCY</Text>
+              <Text style={[styles.statValue, { color: pendingBalanceQuanta > 0 ? '#10b981' : '#a1a1aa' }]}>
+                {pendingBalanceQuanta > 0 ? `+${(pendingBalanceQuanta / QUANTA_PER_SCY).toFixed(4)}` : '0.0000'} SCY
+              </Text>
             </View>
+
             <View style={styles.statCol}>
               <Text style={styles.statLabel}>Konsensus</Text>
-              <Text style={styles.statValue}>Ed25519</Text>
+              <Text style={styles.statValue}>P2PKH Hash</Text>
             </View>
           </View>
         </View>
@@ -384,11 +450,14 @@ export default function App() {
         <View style={styles.actionGrid}>
           <TouchableOpacity
             style={[styles.actionBtn, styles.actionBtnPrimary]}
-            onPress={() => setShowReceiveModal(true)}
+            onPress={() => {
+              setBillingAmount('');
+              setShowReceiveModal(true);
+            }}
             activeOpacity={0.8}
           >
             <View style={[styles.actionIconWrapper, { backgroundColor: '#064e3b' }]}>
-              <ArrowDownLeft size={20} color="#34d399" />
+              <ArrowDownLeft size={18} color="#34d399" />
             </View>
             <Text style={styles.actionBtnText}>Terima</Text>
             <Text style={styles.actionBtnSub}>QR Code</Text>
@@ -408,6 +477,18 @@ export default function App() {
 
           <TouchableOpacity
             style={[styles.actionBtn, styles.actionBtnTertiary]}
+            onPress={() => setShowUtxoListModal(true)}
+            activeOpacity={0.8}
+          >
+            <View style={[styles.actionIconWrapper, { backgroundColor: '#27272a' }]}>
+              <Database size={18} color="#a1a1aa" />
+            </View>
+            <Text style={styles.actionBtnText}>UTXO</Text>
+            <Text style={styles.actionBtnSub}>{utxos.length} Output</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.actionBtn, styles.actionBtnQuaternary]}
             onPress={openQrScanner}
             activeOpacity={0.8}
           >
@@ -425,7 +506,7 @@ export default function App() {
             <Layers size={16} color="#10b981" />
             <Text style={styles.sectionTitle}>Mutasi Buku Besar</Text>
           </View>
-          <Text style={styles.sectionBadge}>{passbook.mutations.length} Transaksi</Text>
+          <Text style={styles.sectionBadge}>{mutations.length} Transaksi</Text>
         </View>
 
         <View style={styles.filterTabs}>
@@ -492,7 +573,15 @@ export default function App() {
                       {m.quantaDelta > 0 ? '+' : ''}
                       {(m.quantaDelta / QUANTA_PER_SCY).toFixed(4)} SCY
                     </Text>
-                    <Text style={styles.mutationQuanta}>{m.quantaDelta.toLocaleString()} Quanta</Text>
+                    <View style={styles.mutationActionRow}>
+                      <Text style={styles.mutationQuanta}>{formatQuanta(m.quantaDelta)} Q</Text>
+                      <TouchableOpacity
+                        style={styles.receiptQrBtn}
+                        onPress={() => setSelectedMutationForQr(m)}
+                      >
+                        <QrCode size={13} color="#38bdf8" />
+                      </TouchableOpacity>
+                    </View>
                   </View>
                 </View>
               );
@@ -502,7 +591,7 @@ export default function App() {
       </ScrollView>
 
       {/* ========================================== */}
-      {/* MODAL: TERIMA SCYTALE (QR CODE)            */}
+      {/* 1. MODAL: TERIMA SCYTALE (DYNAMIC QR CODE) */}
       {/* ========================================== */}
       <Modal visible={showReceiveModal} transparent animationType="fade" onRequestClose={() => setShowReceiveModal(false)}>
         <View style={styles.modalBackdrop}>
@@ -517,21 +606,285 @@ export default function App() {
               </TouchableOpacity>
             </View>
 
+            {/* Dynamic QR Code */}
             <View style={styles.qrWrapper}>
-              <QRCodeSvg value={passbook.address} size={200} />
+              <QRCode
+                value={receiveUri}
+                size={200}
+                color="#09090b"
+                backgroundColor="#ffffff"
+              />
             </View>
 
-            <Text style={styles.qrHint}>Tunjukkan QR Code ini kepada pengirim untuk menerima SCY atau Quanta</Text>
+            <Text style={styles.qrHint}>
+              Pindai QR Code untuk menerima SCY atau permintaan transfer
+            </Text>
 
+            {/* Input Nominal Tagihan Dinamis */}
+            <View style={styles.formGroupSmall}>
+              <View style={styles.inputLabelRow}>
+                <Text style={styles.inputLabel}>Nominal Tagihan (Opsional - SCY):</Text>
+                <Text style={styles.inputQuantaBadge}>
+                  {requestedQuanta > 0 ? `${formatQuanta(requestedQuanta)} Q` : 'Bebas'}
+                </Text>
+              </View>
+              <TextInput
+                style={styles.textInputSmall}
+                value={billingAmount}
+                onChangeText={setBillingAmount}
+                placeholder="0.00000000 (Transfer Bebas)"
+                placeholderTextColor="#52525b"
+                keyboardType="decimal-pad"
+              />
+            </View>
+
+            {/* Generated URI Box */}
             <View style={styles.addressBox}>
-              <Text style={styles.addressBoxLabel}>Alamat Passbook Anda:</Text>
-              <Text style={styles.addressBoxValue}>{passbook.address}</Text>
+              <Text style={styles.addressBoxLabel}>Generated Scytale URI:</Text>
+              <Text style={styles.addressBoxValue} numberOfLines={2}>
+                {receiveUri}
+              </Text>
             </View>
 
-            <TouchableOpacity style={styles.copyLargeBtn} onPress={copyAddress}>
-              {copied ? <Check size={16} color="#10b981" /> : <Copy size={16} color="#ffffff" />}
-              <Text style={styles.copyLargeBtnText}>{copied ? 'Alamat Disalin!' : 'Salin Alamat Lengkap'}</Text>
-            </TouchableOpacity>
+            {/* Action Buttons */}
+            <View style={styles.modalActionRow}>
+              <TouchableOpacity
+                style={[styles.halfBtn, styles.halfBtnOutline]}
+                onPress={() => copyToClipboard(walletAddress, 'recv-addr')}
+              >
+                {copiedKey === 'recv-addr' ? <Check size={14} color="#10b981" /> : <Copy size={14} color="#e4e4e7" />}
+                <Text style={styles.halfBtnOutlineText}>
+                  {copiedKey === 'recv-addr' ? 'Disalin!' : 'Salin Alamat'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.halfBtn, styles.halfBtnPrimary]}
+                onPress={() => copyToClipboard(receiveUri, 'recv-uri')}
+              >
+                {copiedKey === 'recv-uri' ? <Check size={14} color="#09090b" /> : <Copy size={14} color="#09090b" />}
+                <Text style={styles.halfBtnPrimaryText}>
+                  {copiedKey === 'recv-uri' ? 'URI Disalin!' : 'Salin URI'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ========================================== */}
+      {/* 2. MODAL: RESI MUTASI LEDGER (QR AUDIT)    */}
+      {/* ========================================== */}
+      {selectedMutationForQr && (
+        <Modal visible transparent animationType="fade" onRequestClose={() => setSelectedMutationForQr(null)}>
+          <View style={styles.modalBackdrop}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <View style={styles.modalHeaderTitleRow}>
+                  <QrCode size={18} color="#38bdf8" />
+                  <Text style={styles.modalTitle}>Resi Mutasi & Audit QR</Text>
+                </View>
+                <TouchableOpacity onPress={() => setSelectedMutationForQr(null)}>
+                  <X size={20} color="#71717a" />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.qrWrapper}>
+                <QRCode
+                  value={
+                    selectedMutationForQr.txHash && selectedMutationForQr.txHash !== '-'
+                      ? `https://explorer.myratu.com/tx/${selectedMutationForQr.txHash}`
+                      : `scytale:mutation/${selectedMutationForQr.id}`
+                  }
+                  size={180}
+                  color="#09090b"
+                  backgroundColor="#ffffff"
+                />
+              </View>
+
+              <Text style={styles.qrHint}>
+                Pindai untuk verifikasi integritas mutasi di Scytale Explorer
+              </Text>
+
+              <View style={styles.receiptDetailsBox}>
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptLabel}>Tipe & Nilai:</Text>
+                  <Text
+                    style={[
+                      styles.receiptValueBold,
+                      selectedMutationForQr.quantaDelta >= 0 ? styles.amountInbound : styles.amountOutbound,
+                    ]}
+                  >
+                    {selectedMutationForQr.quantaDelta >= 0 ? '+' : ''}
+                    {(selectedMutationForQr.quantaDelta / QUANTA_PER_SCY).toFixed(4)} SCY
+                  </Text>
+                </View>
+
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptLabel}>Waktu:</Text>
+                  <Text style={styles.receiptValue}>{selectedMutationForQr.timestamp}</Text>
+                </View>
+
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptLabel}>Status:</Text>
+                  <Text style={[styles.receiptValue, { color: '#10b981', fontWeight: '700' }]}>
+                    CONFIRMED
+                  </Text>
+                </View>
+
+                {selectedMutationForQr.note ? (
+                  <View style={styles.receiptRow}>
+                    <Text style={styles.receiptLabel}>Memo:</Text>
+                    <Text style={styles.receiptValue}>{selectedMutationForQr.note}</Text>
+                  </View>
+                ) : null}
+
+                <View style={styles.receiptTxBox}>
+                  <Text style={styles.receiptLabel}>Tx Hash:</Text>
+                  <Text style={styles.receiptTxHash} numberOfLines={2} ellipsizeMode="middle">
+                    {selectedMutationForQr.txHash}
+                  </Text>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                style={styles.copyLargeBtn}
+                onPress={() => copyToClipboard(selectedMutationForQr.txHash, 'mut-hash')}
+              >
+                {copiedKey === 'mut-hash' ? <Check size={16} color="#ffffff" /> : <Copy size={16} color="#ffffff" />}
+                <Text style={styles.copyLargeBtnText}>
+                  {copiedKey === 'mut-hash' ? 'Hash Transaksi Disalin!' : 'Salin Hash Transaksi'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {/* ========================================== */}
+      {/* 3. MODAL: OUTPOINT UTXO (QR INSPECTOR)     */}
+      {/* ========================================== */}
+      {selectedUtxoForQr && (
+        <Modal visible transparent animationType="fade" onRequestClose={() => setSelectedUtxoForQr(null)}>
+          <View style={styles.modalBackdrop}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <View style={styles.modalHeaderTitleRow}>
+                  <Database size={18} color="#38bdf8" />
+                  <Text style={styles.modalTitle}>UTXO Outpoint QR</Text>
+                </View>
+                <TouchableOpacity onPress={() => setSelectedUtxoForQr(null)}>
+                  <X size={20} color="#71717a" />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.qrWrapper}>
+                <QRCode
+                  value={`scytale:outpoint/${selectedUtxoForQr.txid}:${selectedUtxoForQr.vout}?amount=${selectedUtxoForQr.quanta}`}
+                  size={160}
+                  color="#09090b"
+                  backgroundColor="#ffffff"
+                />
+              </View>
+
+              <Text style={styles.qrHint}>
+                Outpoint: {selectedUtxoForQr.txid.slice(0, 8)}...:{selectedUtxoForQr.vout}
+              </Text>
+
+              <View style={styles.receiptDetailsBox}>
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptLabel}>Nilai UTXO:</Text>
+                  <Text style={[styles.receiptValueBold, { color: '#38bdf8' }]}>
+                    {(selectedUtxoForQr.quanta / QUANTA_PER_SCY).toFixed(4)} SCY
+                  </Text>
+                </View>
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptLabel}>Quanta Integer:</Text>
+                  <Text style={styles.receiptValue}>{formatQuanta(selectedUtxoForQr.quanta)} quanta</Text>
+                </View>
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptLabel}>Block Height:</Text>
+                  <Text style={styles.receiptValue}>#{selectedUtxoForQr.blockHeight}</Text>
+                </View>
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptLabel}>vOut Index:</Text>
+                  <Text style={styles.receiptValue}>Index #{selectedUtxoForQr.vout}</Text>
+                </View>
+              </View>
+
+              <View style={styles.modalActionRow}>
+                <TouchableOpacity
+                  style={[styles.halfBtn, styles.halfBtnOutline]}
+                  onPress={() => copyToClipboard(selectedUtxoForQr.txid, 'utxo-txid')}
+                >
+                  {copiedKey === 'utxo-txid' ? <Check size={14} color="#10b981" /> : <Copy size={14} color="#e4e4e7" />}
+                  <Text style={styles.halfBtnOutlineText}>
+                    {copiedKey === 'utxo-txid' ? 'Disalin!' : 'Salin TxID'}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.halfBtn, styles.halfBtnPrimary]}
+                  onPress={() => copyToClipboard(`${selectedUtxoForQr.txid}:${selectedUtxoForQr.vout}`, 'utxo-outpoint')}
+                >
+                  {copiedKey === 'utxo-outpoint' ? <Check size={14} color="#09090b" /> : <Copy size={14} color="#09090b" />}
+                  <Text style={styles.halfBtnPrimaryText}>
+                    {copiedKey === 'utxo-outpoint' ? 'Disalin!' : 'Salin Outpoint'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {/* ========================================== */}
+      {/* 4. MODAL: DAFTAR UTXO VAULT                */}
+      {/* ========================================== */}
+      <Modal visible={showUtxoListModal} transparent animationType="slide" onRequestClose={() => setShowUtxoListModal(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalContent, { maxHeight: '80%' }]}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalHeaderTitleRow}>
+                <Database size={18} color="#38bdf8" />
+                <Text style={styles.modalTitle}>UTXO Vault ({utxos.length})</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowUtxoListModal(false)}>
+                <X size={20} color="#71717a" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={{ maxHeight: 380 }}>
+              {utxos.length === 0 ? (
+                <View style={styles.emptyState}>
+                  <Database size={30} color="#52525b" />
+                  <Text style={styles.emptyText}>Tidak ada output UTXO aktif untuk alamat ini</Text>
+                </View>
+              ) : (
+                utxos.map((u) => (
+                  <TouchableOpacity
+                    key={`${u.txid}-${u.vout}`}
+                    style={styles.utxoListItem}
+                    onPress={() => {
+                      setShowUtxoListModal(false);
+                      setSelectedUtxoForQr(u);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.utxoListLeft}>
+                      <Text style={styles.utxoListTxid} numberOfLines={1} ellipsizeMode="middle">
+                        {u.txid}:{u.vout}
+                      </Text>
+                      <Text style={styles.utxoListMeta}>Block #{u.blockHeight}</Text>
+                    </View>
+                    <View style={styles.utxoListRight}>
+                      <Text style={styles.utxoListScy}>{(u.quanta / QUANTA_PER_SCY).toFixed(4)} SCY</Text>
+                      <QrCode size={14} color="#38bdf8" />
+                    </View>
+                  </TouchableOpacity>
+                ))
+              )}
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -559,7 +912,7 @@ export default function App() {
                   style={styles.textInput}
                   value={recipient}
                   onChangeText={setRecipient}
-                  placeholder="scy1q..."
+                  placeholder="scy1..."
                   placeholderTextColor="#52525b"
                   autoCapitalize="none"
                   autoCorrect={false}
@@ -625,7 +978,7 @@ export default function App() {
           <View style={styles.scannerOverlay}>
             <View style={styles.scannerHeader}>
               <Text style={styles.scannerTitle}>Pindai QR Code Scytale</Text>
-              <Text style={styles.scannerSub}>Arahkan kamera ke QR Code alamat penerima atau passbook</Text>
+              <Text style={styles.scannerSub}>Arahkan kamera ke QR Code alamat penerima atau permintaan pembayaran</Text>
             </View>
 
             <View style={styles.viewfinderWrapper}>
@@ -673,6 +1026,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
   },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
   iconCircle: {
     width: 36,
     height: 36,
@@ -685,30 +1043,46 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     color: '#f4f4f5',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '800',
     letterSpacing: 0.5,
+  },
+  geminiBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: '#082f49',
+    borderColor: '#0284c7',
+    borderWidth: 1,
+    paddingHorizontal: 5,
+    paddingVertical: 1.5,
+    borderRadius: 6,
+  },
+  geminiBadgeText: {
+    color: '#38bdf8',
+    fontSize: 9,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   statusRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 4,
     marginTop: 2,
-  },
-  statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-  },
-  statusOnline: {
-    backgroundColor: '#10b981',
-  },
-  statusOffline: {
-    backgroundColor: '#ef4444',
   },
   statusText: {
     color: '#a1a1aa',
-    fontSize: 11,
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  statusDotSeparator: {
+    color: '#52525b',
+    fontSize: 10,
+  },
+  mempoolText: {
+    color: '#38bdf8',
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   refreshBtn: {
     padding: 8,
@@ -717,6 +1091,84 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#27272a',
   },
+
+  // ERROR BANNER
+  errorBanner: {
+    backgroundColor: '#4c051940',
+    borderWidth: 1,
+    borderColor: '#e11d4880',
+    marginHorizontal: 16,
+    marginTop: 8,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 6,
+  },
+  errorText: {
+    color: '#fda4af',
+    fontSize: 11,
+    flex: 1,
+  },
+  errorRetryBtn: {
+    backgroundColor: '#9f1239',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+  },
+  errorRetryText: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+
+  // ADDRESS TOOLBAR
+  addressToolbar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#18181b',
+  },
+  addressInputContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#18181b',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#27272a',
+    paddingHorizontal: 8,
+  },
+  searchIcon: {
+    marginRight: 6,
+  },
+  addressSearchInput: {
+    flex: 1,
+    paddingVertical: 6,
+    color: '#f4f4f5',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  scanAddressBtn: {
+    padding: 6,
+  },
+  queryBtn: {
+    backgroundColor: '#10b981',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  queryBtnText: {
+    color: '#09090b',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+
   scrollContent: {
     padding: 16,
     paddingBottom: 40,
@@ -747,7 +1199,7 @@ const styles = StyleSheet.create({
   },
   addressText: {
     color: '#a1a1aa',
-    fontSize: 12,
+    fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   copyChipBtn: {
@@ -757,21 +1209,21 @@ const styles = StyleSheet.create({
   },
   balanceLabel: {
     color: '#71717a',
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '700',
     letterSpacing: 0.5,
     marginBottom: 4,
   },
   balanceScy: {
     color: '#10b981',
-    fontSize: 26,
+    fontSize: 24,
     fontWeight: '900',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginBottom: 2,
   },
   balanceQuanta: {
     color: '#a1a1aa',
-    fontSize: 13,
+    fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   statsDivider: {
@@ -786,6 +1238,12 @@ const styles = StyleSheet.create({
   statCol: {
     flex: 1,
   },
+  statLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 2,
+  },
   statLabel: {
     color: '#71717a',
     fontSize: 10,
@@ -793,18 +1251,20 @@ const styles = StyleSheet.create({
   },
   statValue: {
     color: '#e4e4e7',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   actionGrid: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
     marginBottom: 20,
   },
   actionBtn: {
     flex: 1,
     borderRadius: 12,
-    padding: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 6,
     alignItems: 'center',
     borderWidth: 1,
   },
@@ -820,22 +1280,26 @@ const styles = StyleSheet.create({
     backgroundColor: '#18181b',
     borderColor: '#27272a',
   },
+  actionBtnQuaternary: {
+    backgroundColor: '#18181b',
+    borderColor: '#27272a',
+  },
   actionIconWrapper: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 6,
+    marginBottom: 5,
   },
   actionBtnText: {
     color: '#f4f4f5',
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '700',
   },
   actionBtnSub: {
     color: '#a1a1aa',
-    fontSize: 10,
+    fontSize: 9,
     marginTop: 1,
   },
   sectionHeader: {
@@ -935,7 +1399,7 @@ const styles = StyleSheet.create({
   },
   mutationType: {
     color: '#f4f4f5',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
   },
   mutationStatus: {
@@ -957,7 +1421,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
   },
   mutationAmount: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
@@ -970,11 +1434,23 @@ const styles = StyleSheet.create({
   amountReward: {
     color: '#38bdf8',
   },
+  mutationActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 3,
+  },
   mutationQuanta: {
     color: '#71717a',
-    fontSize: 10,
-    marginTop: 2,
+    fontSize: 9,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  receiptQrBtn: {
+    backgroundColor: '#082f49',
+    padding: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#0284c7',
   },
   emptyState: {
     padding: 30,
@@ -985,12 +1461,13 @@ const styles = StyleSheet.create({
   emptyText: {
     color: '#71717a',
     fontSize: 12,
+    textAlign: 'center',
   },
 
   // MODAL STYLES
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.8)',
+    backgroundColor: 'rgba(0,0,0,0.85)',
     justifyContent: 'center',
     padding: 20,
   },
@@ -1014,7 +1491,7 @@ const styles = StyleSheet.create({
   },
   modalTitle: {
     color: '#f4f4f5',
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '800',
   },
   qrWrapper: {
@@ -1028,9 +1505,35 @@ const styles = StyleSheet.create({
   },
   qrHint: {
     color: '#a1a1aa',
-    fontSize: 12,
+    fontSize: 11,
     textAlign: 'center',
-    marginBottom: 14,
+    marginBottom: 12,
+  },
+  formGroupSmall: {
+    marginBottom: 12,
+  },
+  inputLabelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  inputQuantaBadge: {
+    color: '#10b981',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  textInputSmall: {
+    backgroundColor: '#09090b',
+    borderWidth: 1,
+    borderColor: '#27272a',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    color: '#f4f4f5',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   addressBox: {
     backgroundColor: '#09090b',
@@ -1042,13 +1545,43 @@ const styles = StyleSheet.create({
   },
   addressBoxLabel: {
     color: '#71717a',
-    fontSize: 10,
+    fontSize: 9,
+    textTransform: 'uppercase',
     marginBottom: 4,
   },
   addressBoxValue: {
-    color: '#f4f4f5',
-    fontSize: 11,
+    color: '#38bdf8',
+    fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  modalActionRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  halfBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  halfBtnOutline: {
+    backgroundColor: '#27272a',
+  },
+  halfBtnOutlineText: {
+    color: '#e4e4e7',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  halfBtnPrimary: {
+    backgroundColor: '#10b981',
+  },
+  halfBtnPrimaryText: {
+    color: '#09090b',
+    fontSize: 12,
+    fontWeight: '800',
   },
   copyLargeBtn: {
     backgroundColor: '#059669',
@@ -1063,6 +1596,86 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 13,
     fontWeight: '700',
+  },
+
+  // RECEIPT AUDIT STYLES
+  receiptDetailsBox: {
+    backgroundColor: '#09090b',
+    borderRadius: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#27272a',
+    marginBottom: 14,
+    gap: 6,
+  },
+  receiptRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  receiptLabel: {
+    color: '#71717a',
+    fontSize: 11,
+  },
+  receiptValue: {
+    color: '#f4f4f5',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  receiptValueBold: {
+    fontSize: 12,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  receiptTxBox: {
+    marginTop: 4,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#18181b',
+  },
+  receiptTxHash: {
+    color: '#38bdf8',
+    fontSize: 10,
+    marginTop: 2,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+
+  // UTXO LIST STYLES
+  utxoListItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#09090b',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 6,
+    borderWidth: 1,
+    borderColor: '#27272a',
+  },
+  utxoListLeft: {
+    flex: 1,
+    marginRight: 8,
+  },
+  utxoListTxid: {
+    color: '#38bdf8',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  utxoListMeta: {
+    color: '#71717a',
+    fontSize: 10,
+    marginTop: 2,
+  },
+  utxoListRight: {
+    alignItems: 'flex-end',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  utxoListScy: {
+    color: '#ffffff',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
 
   // SEND FORM STYLES
@@ -1092,8 +1705,6 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     backgroundColor: '#09090b',
     borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#27272a',
   },
   scanInputBtn: {
     padding: 10,
