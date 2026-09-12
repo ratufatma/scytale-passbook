@@ -26,13 +26,11 @@
     },
     "bundle": {
         "active": true,
-        "targets": [
-            "deb",
-            "appimage"
-        ],
+        "targets": "all",
         "icon": [
             "icons/icon.png",
-            "icons/scytale-passbook.png"
+            "icons/scytale-passbook.png",
+            "icons/icon.ico"
         ]
     }
 }
