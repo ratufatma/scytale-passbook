@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import {
   Shield,
   Layers,
@@ -18,7 +19,8 @@ import {
   Cpu,
   Wifi,
   WifiOff,
-  AlertCircle
+  AlertCircle,
+  ExternalLink
 } from 'lucide-react';
 import GeminiIcon from './icons/GeminiIcon.tsx';
 
@@ -63,7 +65,9 @@ export default function DesktopPassbook() {
   const [searchQuery, setSearchQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<'ALL' | 'INBOUND' | 'OUTBOUND' | 'REWARD'>('ALL');
   const [showQrModal, setShowQrModal] = useState(false);
+  const [billingAmount, setBillingAmount] = useState('');
   const [selectedUtxo, setSelectedUtxo] = useState<UtxoItem | null>(null);
+  const [selectedMutationForQr, setSelectedMutationForQr] = useState<MutationItem | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [networkPing, setNetworkPing] = useState(0);
   const [isOnline, setIsOnline] = useState(true);
@@ -95,6 +99,19 @@ export default function DesktopPassbook() {
   });
 
   const formatQuanta = (quanta: number) => quanta.toLocaleString('en-US');
+
+  // Dynamic QR Code URI generator for receiving transfers
+  const requestedQuanta = useMemo(() => {
+    const parsed = parseFloat(billingAmount);
+    return !isNaN(parsed) && parsed > 0 ? Math.round(parsed * 100000000) : 0;
+  }, [billingAmount]);
+
+  const receiveUri = useMemo(() => {
+    if (requestedQuanta > 0) {
+      return `scytale:${passbookData.p2pkhAddress}?amount=${requestedQuanta}`;
+    }
+    return `scytale:${passbookData.p2pkhAddress}`;
+  }, [passbookData.p2pkhAddress, requestedQuanta]);
 
   const copyToClipboard = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
@@ -249,6 +266,18 @@ export default function DesktopPassbook() {
 
         {/* Quick Actions & Live Refresh */}
         <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+          <button
+            id="receive-qr-header-btn"
+            onClick={() => {
+              setBillingAmount('');
+              setShowQrModal(true);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-semibold rounded-lg bg-cyan-950/50 hover:bg-cyan-900/70 text-cyan-300 border border-cyan-800/50 transition active:scale-95"
+            title="Terima Transfer / Scytale Payment Request"
+          >
+            <QrCode className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Terima / QR Code</span>
+          </button>
           <button
             id="refresh-network-btn"
             onClick={() => void fetchLiveData(walletAddress, nodeUrl)}
@@ -492,12 +521,17 @@ export default function DesktopPassbook() {
                   className="p-3.5 rounded-xl bg-zinc-950/90 border border-zinc-800/80 hover:border-cyan-500/50 transition cursor-pointer group"
                 >
                   <div className="flex items-center justify-between text-xs font-mono mb-1.5">
-                    <span className="text-cyan-400 font-semibold group-hover:text-cyan-300 transition truncate max-w-[170px]" title={`${utxo.txid}:${utxo.vout}`}>
+                    <span className="text-cyan-400 font-semibold group-hover:text-cyan-300 transition truncate max-w-[155px]" title={`${utxo.txid}:${utxo.vout}`}>
                       {utxo.txid.slice(0, 6)}...{utxo.txid.slice(-6)}:{utxo.vout}
                     </span>
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950/70 text-emerald-400 border border-emerald-800/40">
-                      Block #{utxo.blockHeight}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950/70 text-emerald-400 border border-emerald-800/40">
+                        Block #{utxo.blockHeight}
+                      </span>
+                      <span className="text-zinc-500 group-hover:text-cyan-400 transition" title="Pindai Outpoint QR">
+                        <QrCode className="w-3 h-3" />
+                      </span>
+                    </div>
                   </div>
 
                   <div className="text-sm font-mono font-bold text-white flex items-center justify-between">
@@ -610,17 +644,24 @@ export default function DesktopPassbook() {
                       </td>
                       <td className="py-3 text-zinc-300">
                         <div className="flex items-center gap-1.5 font-mono">
-                          <span className="truncate max-w-[140px]">{m.txHash}</span>
+                          <span className="truncate max-w-[130px]" title={m.txHash}>{m.txHash}</span>
                           <button
                             onClick={() => copyToClipboard(m.txHash, m.id)}
                             className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition"
-                            title="Copy Tx Hash"
+                            title="Salin Hash Transaksi"
                           >
                             {copiedKey === m.id ? (
                               <Check className="w-3 h-3 text-emerald-400" />
                             ) : (
                               <Copy className="w-3 h-3" />
                             )}
+                          </button>
+                          <button
+                            onClick={() => setSelectedMutationForQr(m)}
+                            className="p-1 rounded hover:bg-cyan-950/60 text-zinc-500 hover:text-cyan-400 transition"
+                            title="Lihat Receipt QR & Audit Explorer"
+                          >
+                            <QrCode className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </td>
@@ -660,96 +701,236 @@ export default function DesktopPassbook() {
         </div>
       </main>
 
-      {/* QR Code Modal Dialog */}
+      {/* 1. RECEIVE & PAYMENT REQUEST DYNAMIC QR MODAL */}
       {showQrModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-sm w-full shadow-2xl relative">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-md w-full shadow-2xl relative font-sans text-xs">
             <div className="flex items-center justify-between mb-4 border-b border-zinc-800 pb-3">
               <div className="flex items-center gap-2">
                 <QrCode className="w-4 h-4 text-emerald-400" />
-                <h3 className="text-sm font-mono font-bold uppercase text-white">Passbook Address QR</h3>
+                <h3 className="text-sm font-mono font-bold uppercase text-white">Terima Transfer / Scytale Payment Request</h3>
               </div>
               <button
-                onClick={() => setShowQrModal(false)}
-                className="text-zinc-400 hover:text-white text-xs font-mono p-1"
+                onClick={() => {
+                  setShowQrModal(false);
+                  setBillingAmount('');
+                }}
+                className="text-zinc-400 hover:text-white text-xs font-mono p-1 transition"
               >
                 ✕ Close
               </button>
             </div>
 
-            {/* Stylized QR Code Visual */}
-            <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 flex flex-col items-center justify-center mb-4">
-              <div className="w-48 h-48 bg-white p-3 rounded-lg flex items-center justify-center shadow-inner">
-                <svg viewBox="0 0 100 100" className="w-full h-full">
-                  <rect width="100" height="100" fill="white" />
-                  <rect x="10" y="10" width="25" height="25" fill="black" />
-                  <rect x="14" y="14" width="17" height="17" fill="white" />
-                  <rect x="18" y="18" width="9" height="9" fill="black" />
-                  <rect x="65" y="10" width="25" height="25" fill="black" />
-                  <rect x="69" y="14" width="17" height="17" fill="white" />
-                  <rect x="73" y="18" width="9" height="9" fill="black" />
-                  <rect x="10" y="65" width="25" height="25" fill="black" />
-                  <rect x="14" y="69" width="17" height="17" fill="white" />
-                  <rect x="18" y="73" width="9" height="9" fill="black" />
-                  <rect x="42" y="12" width="6" height="6" fill="black" />
-                  <rect x="52" y="12" width="6" height="6" fill="black" />
-                  <rect x="42" y="24" width="6" height="12" fill="black" />
-                  <rect x="52" y="30" width="6" height="6" fill="black" />
-                  <rect x="12" y="42" width="6" height="6" fill="black" />
-                  <rect x="24" y="42" width="12" height="6" fill="black" />
-                  <rect x="42" y="42" width="16" height="16" fill="black" />
-                  <rect x="65" y="42" width="6" height="6" fill="black" />
-                  <rect x="78" y="42" width="12" height="6" fill="black" />
-                  <rect x="65" y="52" width="12" height="6" fill="black" />
-                  <rect x="12" y="52" width="6" height="6" fill="black" />
-                  <rect x="24" y="52" width="6" height="6" fill="black" />
-                  <rect x="42" y="65" width="6" height="12" fill="black" />
-                  <rect x="52" y="72" width="6" height="6" fill="black" />
-                  <rect x="65" y="65" width="12" height="6" fill="black" />
-                  <rect x="78" y="72" width="12" height="12" fill="black" />
-                  <rect x="65" y="78" width="6" height="6" fill="black" />
-                  <rect x="52" y="84" width="6" height="6" fill="black" />
-                </svg>
+            {/* Dynamic QR Code Canvas/SVG */}
+            <div className="bg-zinc-950 p-5 rounded-xl border border-zinc-800 flex flex-col items-center justify-center mb-4 shadow-inner">
+              <div className="bg-white p-3.5 rounded-xl shadow-lg flex items-center justify-center">
+                <QRCodeSVG
+                  value={receiveUri}
+                  size={200}
+                  level="M"
+                  includeMargin={false}
+                />
               </div>
-              <div className="text-[10px] font-mono text-zinc-400 mt-2 text-center break-all">
-                {passbookData.accountNumber} • {passbookData.passbookId.slice(0, 20)}...
+              <span className="text-[11px] font-mono text-zinc-400 mt-3 text-center">
+                Pindai dengan Scytale Wallet atau kamera ponsel
+              </span>
+            </div>
+
+            {/* Billing Amount (SCY) Input */}
+            <div className="mb-4 space-y-1.5">
+              <div className="flex items-center justify-between text-xs font-mono">
+                <label htmlFor="billing-amount-input" className="text-zinc-300 font-semibold">
+                  Nominal Tagihan (Opsional - SCY):
+                </label>
+                <span className="text-[11px] text-emerald-400 font-bold">
+                  {requestedQuanta > 0 ? `${formatQuanta(requestedQuanta)} quanta` : 'Bebas Nominal'}
+                </span>
+              </div>
+              <div className="relative">
+                <input
+                  id="billing-amount-input"
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={billingAmount}
+                  onChange={(e) => setBillingAmount(e.target.value)}
+                  placeholder="Contoh: 1.5 (kosongkan untuk transfer terbuka)"
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-3 pr-12 py-2 text-xs font-mono text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-emerald-500/60"
+                />
+                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-mono text-zinc-400 font-bold">
+                  SCY
+                </span>
               </div>
             </div>
 
-            <div className="space-y-2">
+            {/* Monospace Payload Preview */}
+            <div className="mb-4">
+              <span className="text-[10px] font-mono uppercase text-zinc-500 block mb-1">Generated Scytale URI:</span>
+              <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800 text-[10px] font-mono text-cyan-300 break-all select-all">
+                {receiveUri}
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="grid grid-cols-2 gap-2 font-mono text-xs">
               <button
-                onClick={() => copyToClipboard(passbookData.passbookId, 'qr-pb')}
-                className="w-full py-2 px-3 text-xs font-mono font-medium rounded-lg bg-emerald-500 hover:bg-emerald-600 text-zinc-950 font-bold transition flex items-center justify-center gap-1.5"
+                onClick={() => copyToClipboard(passbookData.p2pkhAddress, 'recv-addr')}
+                className="py-2 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition font-medium flex items-center justify-center gap-1.5 active:scale-95"
               >
-                {copiedKey === 'qr-pb' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                <span>{copiedKey === 'qr-pb' ? 'Copied Passbook ID!' : 'Copy Full Passbook ID'}</span>
+                {copiedKey === 'recv-addr' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedKey === 'recv-addr' ? 'Tersalin!' : 'Salin Alamat'}</span>
+              </button>
+              <button
+                onClick={() => copyToClipboard(receiveUri, 'recv-uri')}
+                className="py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold transition flex items-center justify-center gap-1.5 active:scale-95"
+              >
+                {copiedKey === 'recv-uri' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedKey === 'recv-uri' ? 'URI Tersalin!' : 'Salin URI Transfer'}</span>
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* UTXO Details Inspector Modal */}
-      {selectedUtxo && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 max-w-md w-full shadow-2xl relative font-mono text-xs">
+      {/* 2. TRANSACTION RECEIPT & AUDIT DYNAMIC QR MODAL */}
+      {selectedMutationForQr && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-md w-full shadow-2xl relative font-sans text-xs">
             <div className="flex items-center justify-between mb-4 border-b border-zinc-800 pb-3">
               <div className="flex items-center gap-2">
-                <Database className="w-4 h-4 text-cyan-400" />
-                <h3 className="font-bold uppercase text-white">UTXO Output Inspector</h3>
+                <QrCode className="w-4 h-4 text-cyan-400" />
+                <h3 className="font-mono font-bold uppercase text-white">Receipt QR & Ledger Audit</h3>
               </div>
               <button
-                onClick={() => setSelectedUtxo(null)}
-                className="text-zinc-400 hover:text-white p-1"
+                onClick={() => setSelectedMutationForQr(null)}
+                className="text-zinc-400 hover:text-white font-mono p-1 transition"
               >
                 ✕ Close
               </button>
             </div>
 
+            {/* QR Code */}
+            <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 flex flex-col items-center justify-center mb-4">
+              <div className="bg-white p-3 rounded-xl shadow-lg flex items-center justify-center">
+                <QRCodeSVG
+                  value={
+                    selectedMutationForQr.txHash && selectedMutationForQr.txHash !== '-'
+                      ? `https://explorer.myratu.com/tx/${selectedMutationForQr.txHash}`
+                      : `scytale:mutation/${selectedMutationForQr.id}`
+                  }
+                  size={180}
+                  level="M"
+                />
+              </div>
+              <span className="text-[10px] font-mono text-zinc-400 mt-2 text-center">
+                Pindai untuk verifikasi langsung di Scytale Explorer
+              </span>
+            </div>
+
+            {/* Details */}
+            <div className="space-y-2.5 font-mono mb-4">
+              <div className="flex items-center justify-between p-2.5 rounded bg-zinc-950 border border-zinc-800">
+                <span className="text-zinc-400 text-[11px]">Tipe & Nilai:</span>
+                <div className="text-right">
+                  <span className={`font-bold ${selectedMutationForQr.quantaDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {selectedMutationForQr.quantaDelta >= 0 ? '+' : ''}{formatSCY(selectedMutationForQr.quantaDelta)} SCY
+                  </span>
+                  <div className="text-[10px] text-zinc-500">
+                    ({formatQuanta(selectedMutationForQr.quantaDelta)} quanta)
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div className="p-2 rounded bg-zinc-950 border border-zinc-800">
+                  <span className="text-[10px] text-zinc-500 block uppercase">Status</span>
+                  <span className="text-emerald-400 font-bold text-[11px] flex items-center gap-1 mt-0.5">
+                    <Check className="w-3 h-3" /> CONFIRMED
+                  </span>
+                </div>
+                <div className="p-2 rounded bg-zinc-950 border border-zinc-800">
+                  <span className="text-[10px] text-zinc-500 block uppercase">Waktu</span>
+                  <span className="text-zinc-300 text-[10px] truncate block mt-0.5" title={selectedMutationForQr.timestamp}>
+                    {selectedMutationForQr.timestamp.slice(0, 19).replace('T', ' ')}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <span className="text-[10px] uppercase text-zinc-500 block mb-1">Transaction Hash (TxID):</span>
+                <div className="p-2 rounded bg-zinc-950 border border-zinc-800 text-[11px] text-cyan-300 break-all select-all">
+                  {selectedMutationForQr.txHash}
+                </div>
+              </div>
+
+              {selectedMutationForQr.note && (
+                <div className="p-2 rounded bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-300">
+                  <span className="text-[10px] text-zinc-500 block uppercase mb-0.5">Memo:</span>
+                  {selectedMutationForQr.note}
+                </div>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center gap-2 font-mono">
+              <button
+                onClick={() => copyToClipboard(selectedMutationForQr.txHash, 'mut-tx-copy')}
+                className="flex-1 py-2 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition font-medium flex items-center justify-center gap-1.5 active:scale-95"
+              >
+                {copiedKey === 'mut-tx-copy' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedKey === 'mut-tx-copy' ? 'Tersalin!' : 'Salin Hash'}</span>
+              </button>
+              {selectedMutationForQr.txHash && selectedMutationForQr.txHash !== '-' && (
+                <a
+                  href={`https://explorer.myratu.com/tx/${selectedMutationForQr.txHash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-zinc-950 font-bold transition flex items-center justify-center gap-1.5 active:scale-95"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Buka Explorer</span>
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. UTXO DETAILS INSPECTOR & OUTPOINT QR MODAL */}
+      {selectedUtxo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 max-w-md w-full shadow-2xl relative font-mono text-xs">
+            <div className="flex items-center justify-between mb-4 border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Database className="w-4 h-4 text-cyan-400" />
+                <h3 className="font-bold uppercase text-white">UTXO Output Inspector & QR</h3>
+              </div>
+              <button
+                onClick={() => setSelectedUtxo(null)}
+                className="text-zinc-400 hover:text-white p-1 transition"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            {/* Outpoint QR Code */}
+            <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 flex flex-col items-center justify-center mb-4">
+              <div className="bg-white p-2.5 rounded-xl shadow-lg flex items-center justify-center">
+                <QRCodeSVG
+                  value={`scytale:outpoint/${selectedUtxo.txid}:${selectedUtxo.vout}?amount=${selectedUtxo.quanta}`}
+                  size={160}
+                  level="M"
+                />
+              </div>
+              <span className="text-[10px] font-mono text-zinc-400 mt-2 text-center">
+                Outpoint: {selectedUtxo.txid.slice(0, 8)}...:{selectedUtxo.vout}
+              </span>
+            </div>
+
             <div className="space-y-3">
               <div>
                 <span className="text-[10px] uppercase text-zinc-400 block mb-1">Transaction Hash (TxID)</span>
-                <div className="p-2 rounded bg-zinc-950 border border-zinc-800 text-cyan-300 break-all text-[11px]">
+                <div className="p-2 rounded bg-zinc-950 border border-zinc-800 text-cyan-300 break-all text-[11px] select-all">
                   {selectedUtxo.txid}
                 </div>
               </div>
@@ -780,27 +961,52 @@ export default function DesktopPassbook() {
               {selectedUtxo.scriptPubKey && (
                 <div>
                   <span className="text-[10px] uppercase text-zinc-400 block mb-1">scriptPubKey (P2PKH)</span>
-                  <div className="p-2 rounded bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-400 break-all">
+                  <div className="p-2 rounded bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-400 break-all select-all">
                     {selectedUtxo.scriptPubKey}
                   </div>
                 </div>
               )}
             </div>
 
-            <div className="mt-5 pt-3 border-t border-zinc-800 flex justify-end gap-2">
-              <button
-                onClick={() => copyToClipboard(selectedUtxo.txid, 'utxo-copy')}
-                className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition text-xs flex items-center gap-1.5"
-              >
-                {copiedKey === 'utxo-copy' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                <span>Copy TxID</span>
-              </button>
-              <button
-                onClick={() => setSelectedUtxo(null)}
-                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold transition text-xs"
-              >
-                Done
-              </button>
+            <div className="mt-5 pt-3 border-t border-zinc-800 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => copyToClipboard(selectedUtxo.txid, 'utxo-copy')}
+                  className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition text-xs flex items-center gap-1.5 active:scale-95"
+                  title="Salin TxID"
+                >
+                  {copiedKey === 'utxo-copy' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedKey === 'utxo-copy' ? 'Tersalin!' : 'Copy TxID'}</span>
+                </button>
+                <button
+                  onClick={() => copyToClipboard(`${selectedUtxo.txid}:${selectedUtxo.vout}`, 'outpoint-copy')}
+                  className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition text-xs flex items-center gap-1.5 active:scale-95"
+                  title="Salin Outpoint txid:vout"
+                >
+                  {copiedKey === 'outpoint-copy' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedKey === 'outpoint-copy' ? 'Tersalin!' : 'Copy Outpoint'}</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {selectedUtxo.txid && !selectedUtxo.txid.startsWith('00000000') && (
+                  <a
+                    href={`https://explorer.myratu.com/tx/${selectedUtxo.txid}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-2.5 py-1.5 rounded-lg bg-cyan-950/60 hover:bg-cyan-900/80 text-cyan-300 border border-cyan-800/50 transition text-xs flex items-center gap-1.5 active:scale-95"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Explorer</span>
+                  </a>
+                )}
+                <button
+                  onClick={() => setSelectedUtxo(null)}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold transition text-xs active:scale-95"
+                >
+                  Done
+                </button>
+              </div>
             </div>
           </div>
         </div>
