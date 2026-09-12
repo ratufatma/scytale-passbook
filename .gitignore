@@ -13,3 +13,12 @@ src-tauri/target/
 *.tsbuildinfo
 .expo/
 
+# Android Build Outputs
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/.idea/
+mobile/android/local.properties
+mobile/android/.cxx/
+*.apk
+*.aab
