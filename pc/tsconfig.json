@@ -24,5 +24,5 @@
     "noEmit": true
   },
   "include": ["src"],
-  "exclude": ["pc", "mobile", "node_modules", "dist"]
+  "exclude": ["src-tauri", "node_modules", "dist"]
 }

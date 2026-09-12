@@ -24,7 +24,6 @@ import {
   PlusCircle,
   Cpu
 } from 'lucide-react';
-import GeminiIcon from './icons/GeminiIcon.tsx';
 
 export interface UtxoItem {
   txid: string;
@@ -224,7 +223,6 @@ export default function PassbookCanvas() {
             <span className="w-3 h-3 rounded-full bg-emerald-500 animate-ping absolute opacity-75" />
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 relative" />
           </div>
-          <GeminiIcon className="w-6 h-6 rounded-md shrink-0 shadow-lg shadow-cyan-950/50" size={24} />
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-mono tracking-widest text-emerald-400 font-bold uppercase">
@@ -232,9 +230,6 @@ export default function PassbookCanvas() {
               </span>
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-400 font-mono">
                 P2PKH Engine
-              </span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950/40 border border-cyan-800/40 text-cyan-400 font-mono">
-                Gemini Core
               </span>
             </div>
             <div className="text-[11px] font-mono text-zinc-400 flex items-center gap-2 mt-0.5">

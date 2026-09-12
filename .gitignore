@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+target/
+src-tauri/target/
+*.AppImage
+*.deb
+*.tsbuildinfo
+.expo/
+

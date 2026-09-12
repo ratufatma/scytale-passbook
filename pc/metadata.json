@@ -1,0 +1,6 @@
+{
+  "name": "Scytale Passbook Canvas",
+  "description": "Cryptographic Passbook Canvas for the Scytale blockchain featuring dual balance display, UTXO vault, ledger mutation journal, and viewport preview.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
